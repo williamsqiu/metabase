@@ -233,7 +233,7 @@
 
 (defn date-string?
   "Is S a valid ISO 8601 date string?"
-  [^String s]
+  [s]
   (boolean (when (string? s)
              (u/ignore-exceptions
                ;; Using UTC as the timezone here as it's `def`'d and the result of the parse is discarded, any

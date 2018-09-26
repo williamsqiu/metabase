@@ -3,15 +3,18 @@
   (:require [clojure
              [string :as str]
              [walk :as walk]]
-            [metabase.mbql.schema :as mbql.s]
-            [metabase.util :as u]
-            [metabase.util.schema :as su]
-            [schema.core :as s]))
+            [clojure.spec.alpha :as s]
+            [metabase.util :as u]))
 
-(s/defn normalize-token :- s/Keyword
+;; someone has to do it!
+(require 'metabase.mbql.spec)
+
+(defn normalize-token
   "Convert a string or keyword in various cases (`lisp-case`, `snake_case`, or `SCREAMING_SNAKE_CASE`) to a lisp-cased
   keyword."
-  [token :- su/KeywordOrString]
+  [token]
+  {:pre  [(s/assert (s/or :keyword keyword?, :str string?) token)]
+   :post [(s/assert keyword? %)]}
   (-> (u/keyword->qualified-name token)
       str/lower-case
       (str/replace #"_" "-")
@@ -106,10 +109,10 @@
 ;; TODO - I think we actually should move this stuff into a `mbql.helpers` namespace so we can use the util functions
 ;; above in the `schema.helpers` namespace instead of duplicating them
 
-(s/defn simplify-compound-filter :- mbql.s/Filter
+(defn simplify-compound-filter
   "Simplify compound `:and`, `:or`, and `:not` compound filters, combining or eliminating them where possible. This
   also fixes theoretically disallowed compound filters like `:and` with only a single subclause."
-  [[filter-name & args :as filter-clause]]
+  [[filter-name & args, :as filter-clause]]
   (cond
     ;; for `and` or `not` compound filters with only one subclase, just unnest the subclause
     (and (#{:and :or} filter-name)
@@ -138,20 +141,26 @@
     (recur (second (first args)))
 
     :else
-    filter-clause))
+    (and
+     (s/assert :mbql/filter filter-clause)
+     filter-clause)))
 
 ;; TODO - we should validate the query against the Query schema and the output as well. Flip that on once the schema
 ;; is locked-in 100%
 
-(s/defn combine-filter-clauses :- mbql.s/Filter
+(defn combine-filter-clauses
   "Combine two filter clauses into a single clause in a way that minimizes slapping a bunch of `:and`s together if
   possible."
   [filter-clause & more-filter-clauses]
+  {:post [(s/assert :mbql/filter %)]}
   (simplify-compound-filter (vec (cons :and (filter identity (cons filter-clause more-filter-clauses))))))
 
-(s/defn add-filter-clause :- mbql.s/Query
+(defn add-filter-clause
   "Add an additional filter clause to an `outer-query`. If `new-clause` is `nil` this is a no-op."
-  [outer-query :- mbql.s/Query, new-clause :- (s/maybe mbql.s/Filter)]
+  [outer-query new-clause]
+  {:pre  [(s/assert :metabase/query outer-query)
+          (when new-clause (s/assert :mbql/filter new-clause))]
+   :post [(s/assert :metabase/query %)]}
   (if-not new-clause
     outer-query
     (update-in outer-query [:query :filter] combine-filter-clauses new-clause)))
@@ -198,10 +207,13 @@
     ;; for anything else, including expressions and ag clause references, just return the clause as-is
     clause))
 
-(s/defn add-order-by-clause :- mbql.s/Query
+(defn add-order-by-clause
   "Add a new `:order-by` clause to an MBQL query. If the new order-by clause references a Field that is already being
   used in another order-by clause, this function does nothing."
-  [outer-query :- mbql.s/Query, order-by-clause :- mbql.s/OrderBy]
+  [outer-query order-by-clause]
+  {:pre  [(s/assert :metabase/query outer-query)
+          (s/assert :mbql/order-by order-by-clause)]
+   :post [(s/assert :metabase/query %)]}
   (let [existing-clauses (set (map (comp field-clause->id-or-literal second)
                                    (-> outer-query :query :order-by)))]
     (if (existing-clauses (field-clause->id-or-literal (second order-by-clause)))

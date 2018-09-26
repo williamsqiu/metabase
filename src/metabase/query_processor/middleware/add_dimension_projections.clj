@@ -24,41 +24,44 @@
   `:remapped_from` and `:remapped_to` are the names of the columns, e.g. `category_id` is `:remapped_to` `name`, and
   `name` is `:remapped_from` `:category_id`."
   (:require [metabase.mbql
-             [schema :as mbql.s]
              [util :as mbql.u]]
             [metabase.models.dimension :refer [Dimension]]
             [metabase.util :as u]
-            [metabase.util.schema :as su]
-            [schema.core :as s]
-            [toucan.db :as db]))
+            [clojure.spec.alpha :as s]
+            [toucan.db :as db]
+            [clojure.string :as str]))
 
-(def ^:private ExternalRemappingDimension
-  "Schema for the info we fetch about `external` type Dimensions that will be used for remappings in this Query. Fetched
-  by the pre-processing portion of the middleware, and passed along to the post-processing portion."
-  {:name                    su/NonBlankString       ; display name for the remapping
-   :field_id                su/IntGreaterThanZero   ; ID of the Field being remapped
-   :human_readable_field_id su/IntGreaterThanZero}) ; ID of the FK Field to remap values to
+;; Spec for the info we fetch about `external` type Dimensions that will be used for remappings in this Query. Fetched
+;; by the pre-processing portion of the middleware, and passed along to the post-processing portion.
+(s/def ::name                    (s/and string? (complement str/blank?)))
+(s/def ::field_id                (s/and int? pos?))
+(s/def ::human_readable_field_id (s/and int? pos?))
+
+(s/def ::external-remapping-dimension
+  (s/keys :req-un [::name ::field_id ::human_readable_field_id]))
 
 
 ;;; ----------------------------------------- add-fk-remaps (pre-processing) -----------------------------------------
 
-(s/defn ^:private fields->field-id->remapping-dimension :- (s/maybe {su/IntGreaterThanZero ExternalRemappingDimension})
+(defn- fields->field-id->remapping-dimension
   "Given a sequence of field clauses (from the `:fields` clause), return a map of `:field-id` clause (other clauses
   are ineligable) to a remapping dimension information for any Fields that have an `external` type dimension remapping."
-  [fields :- [mbql.s/Field]]
+  [fields]
+  {:pre  [(s/assert (s/* :mbql/field) fields)]
+   :post [(s/assert (s/or :nil nil?, :map (s/map-of (s/and int? pos?) ::external-remapping-dimension)) %)]}
   (when-let [field-ids (seq (map second (filter (partial mbql.u/is-clause? :field-id) fields)))]
     (u/key-by :field_id (db/select [Dimension :field_id :name :human_readable_field_id]
                           :field_id [:in (set field-ids)]
                           :type     "external"))))
 
-(s/defn ^:private create-remap-col-tuples :- [[(s/one mbql.s/field-id            "Field")
-                                               (s/one mbql.s/fk->                "remapped FK Field")
-                                               (s/one ExternalRemappingDimension "remapping Dimension info")]]
+(defn- create-remap-col-tuples
   "Return tuples of `:field-id` clauses, the new remapped column `:fk->` clauses that the Field should be remapped to,
   and the Dimension that suggested the remapping, which is used later in this middleware for post-processing. Order is
   important here, because the results are added to the `:fields` column in order. (TODO - why is it important, if they
   get hidden when displayed anyway?)"
-  [fields :- [mbql.s/Field]]
+  [fields]
+  {:pre  [(s/assert (s/* :mbql/field) fields)]
+   :post [(s/assert (s/* (s/tuple :mbql.field/field-id :mbql.field/fk-> ::external-remapping-dimension)) %)]}
   (when-let [field-id->remapping-dimension (fields->field-id->remapping-dimension fields)]
     (vec (for [field fields
                :when (mbql.u/is-clause? :field-id field)
@@ -68,22 +71,26 @@
             [:fk-> field [:field-id (:human_readable_field_id dimension)]]
             dimension]))))
 
-(s/defn ^:private update-remapped-order-by :- [mbql.s/OrderBy]
+(defn- update-remapped-order-by
   "Order by clauses that include an external remapped column should be replace that original column in the order by with
   the newly remapped column. This should order by the text of the remapped column vs. the id of the source column
   before the remapping"
-  [field->remapped-col :- {mbql.s/field-id, mbql.s/fk->}, order-by-clauses :- [mbql.s/OrderBy]]
+  [field->remapped-col order-by-clauses]
+  {:pre  [(s/assert (s/map-of :mbql.field/field-id :mbql.field/fk->) field->remapped-col)
+          (s/assert (s/* :mbql/order-by) order-by-clauses)]
+   :post [(s/assert (s/* :mbql/order-by) %)]}
   (vec
    (for [[direction field, :as order-by-clause] order-by-clauses]
      (if-let [remapped-col (get field->remapped-col field)]
        [direction remapped-col]
        order-by-clause))))
 
-(s/defn ^:private add-fk-remaps :- [(s/one (s/maybe [ExternalRemappingDimension]) "external remapping dimensions")
-                                    (s/one mbql.s/Query "query")]
+(defn- add-fk-remaps
   "Add any Fields needed for `:external` remappings to the `:fields` clause of the query, and update `:order-by`
   clause as needed. Returns a pair like `[external-remapping-dimensions updated-query]`."
-  [{{:keys [fields order-by]} :query, :as query} :- mbql.s/Query]
+  [{{:keys [fields order-by]} :query, :as query}]
+  {:pre  [(s/assert :metabase/query query)]
+   :post [(s/assert (s/tuple (s/or :nil nil?, :dimension ::external-remapping-dimension) :metabase.query) %)]}
   ;; fetch remapping column pairs if any exist...
   (if-let [remap-col-tuples (seq (create-remap-col-tuples fields))]
     ;; if they do, update `:fields` and `:order-by` clauses accordingly and add to the query
@@ -102,14 +109,16 @@
 
 ;;; ---------------------------------------- remap-results (post-processing) -----------------------------------------
 
-(s/defn ^:private add-remapping-info :- [su/Map]
+(defn- add-remapping-info
   "Add `:display_name`, `:remapped_to`, and `:remapped_from` keys to columns for the results, needed by the frontend.
   To get this critical information, this uses the `remapping-dimensions` info saved by the pre-processing portion of
   this middleware for external remappings, and the internal-only remapped columns handled by post-processing
   middleware below for internal columns."
-  [remapping-dimensions   :- (s/maybe [ExternalRemappingDimension])
-   columns                :- [su/Map]
-   internal-remap-columns :- (s/maybe [su/Map])]
+  [remapping-dimensions columns internal-remap-columns]
+  {:pre  [(s/assert (s/or :nil nil?, :dimensions (s/* ::external-remapping-dimension)) remapping-dimensions)
+          (s/assert (s/* map?) columns)
+          (s/assert (some-fn nil? map?) internal-remap-columns)]
+   :post [(s/assert map? %)]}
   (let [column-id->column              (u/key-by :id columns)
         name->internal-remapped-to-col (u/key-by :remapped_from internal-remap-columns)
         id->remapped-to-dimension      (u/key-by :field_id                remapping-dimensions)
@@ -176,12 +185,13 @@
                           (xform-fn (nth row col-index)))
                         dim-seq))))
 
-(s/defn ^:private remap-results
+(defn- remap-results
   "Munges results for remapping after the query has been executed. For internal remappings, a new column needs to be
   added and each row flowing through needs to include the remapped data for the new column. For external remappings,
   the column information needs to be updated with what it's being remapped from and the user specified name for the
   remapped column."
-  [remapping-dimensions :- (s/maybe [ExternalRemappingDimension]), results]
+  [remapping-dimensions results]
+  {:pre [(s/assert (s/or :nil nil?, :dimensions (s/* ::external-remapping-dimension)) remapping-dimensions)]}
   (let [indexed-dims       (keep-indexed col->dim-map (:cols results))
         internal-only-dims (filter #(= :internal (:dimension-type %)) indexed-dims)
         remap-fn           (row-map-fn internal-only-dims)

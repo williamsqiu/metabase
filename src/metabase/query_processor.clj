@@ -1,11 +1,11 @@
 (ns metabase.query-processor
   "Preprocessor that does simple transformations to all incoming queries, simplifing the driver-specific
   implementations."
-  (:require [clojure.tools.logging :as log]
+  (:require [clojure.spec.alpha :as s]
+            [clojure.tools.logging :as log]
             [metabase
              [driver :as driver]
              [util :as u]]
-            [metabase.mbql.schema :as mbql.s]
             [metabase.models
              [query :as query]
              [query-execution :as query-execution :refer [QueryExecution]]]
@@ -43,7 +43,6 @@
             [metabase.util
              [date :as du]
              [i18n :refer [tru]]]
-            [schema.core :as s]
             [toucan.db :as db]))
 
 ;;; +----------------------------------------------------------------------------------------------------------------+
@@ -267,7 +266,7 @@
         (save-and-return-failed-query! query-execution (.getMessage e))))))
 
 ;; TODO - couldn't saving the query execution be done by MIDDLEWARE?
-(s/defn process-query-and-save-execution!
+(defn process-query-and-save-execution!
   "Process and run a json based dataset query and return results.
 
   Takes 2 arguments:
@@ -280,7 +279,8 @@
 
   OPTIONS must conform to the `mbql.s/Info` schema; refer to that for more details."
   {:style/indent 1}
-  [query, options :- mbql.s/Info]
+  [query options]
+  {:pre [(s/assert :query/info options)]}
   (run-and-save-query! (assoc query :info (assoc options
                                             :query-hash (qputil/query-hash query)
                                             :query-type (if (qputil/mbql-query? query) "MBQL" "native")))))
@@ -298,8 +298,9 @@
   {:max-results           max-results
    :max-results-bare-rows max-results-bare-rows})
 
-(s/defn process-query-and-save-with-max!
+(defn process-query-and-save-with-max!
   "Same as `process-query-and-save-execution!` but will include the default max rows returned as a constraint"
   {:style/indent 1}
-  [query, options :- mbql.s/Info]
+  [query options]
+  {:pre [(s/assert :query/info options)]}
   (process-query-and-save-execution! (assoc query :constraints default-query-constraints) options))

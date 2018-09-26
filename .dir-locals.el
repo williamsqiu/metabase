@@ -15,6 +15,7 @@
                               (ex-info 1)
                               (execute-sql! 2)
                               (expect 0)
+                              (s/fdef 1)
                               (match 1)
                               (merge-with 1)
                               (with-redefs-fn 1)))))))
