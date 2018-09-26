@@ -1,9 +1,10 @@
 (ns metabase.mbql.spec
   "Spec for a valid *normalized* MBQL query. This is also the definitive grammar for MBQL, wow!"
   (:require [clojure.spec.alpha :as s]
-            [clojure.string :as str]
             [metabase.models.query :as query]
             [metabase.util.date :as du]))
+
+(require 'metabase.spec)
 
 (defn- clause-name [x]
   (when (sequential? x)
@@ -13,65 +14,32 @@
   (fn [x]
     (= (clause-name x) clause)))
 
-(defmacro ^:private def-one-of {:style/indent 1} [spec-name & clause-name-spec-pairs]
-  (let [multimethod-name (symbol (str "one-of-" (-> (str (namespace spec-name) \_ (name spec-name))
-                                                    munge
-                                                    (str/replace #"\." "_"))))]
-    `(do
-       (defmulti ~(vary-meta multimethod-name assoc :private true) clause-name)
-
-       ~@(for [[clause spec] (partition 2 clause-name-spec-pairs)]
-           `(defmethod ~multimethod-name ~clause [~'_] ~spec))
-
-       (s/def ~spec-name
-         (s/multi-spec ~multimethod-name :clause-name)))))
-
-
-;;; +----------------------------------------------------------------------------------------------------------------+
-;;; |                                                   Primitives                                                   |
-;;; +----------------------------------------------------------------------------------------------------------------+
-
-(s/def ::positive-int
-  (s/and int? pos?))
-
-(s/def ::positive-number
-  (s/and number? pos?))
-
-(s/def ::non-negative-int
-  (s/and int? (complement neg?)))
-
-(s/def ::non-blank-string
-  (s/and string? (complement str/blank?)))
-
 
 ;;; +----------------------------------------------------------------------------------------------------------------+
 ;;; |                                                   DateTimes                                                    |
 ;;; +----------------------------------------------------------------------------------------------------------------+
 
-(s/def ::datetime-unit
+(s/def :metabase/datetime-unit
   #{:default :minute :minute-of-hour :hour :hour-of-day :day :day-of-week :day-of-month :day-of-year :week :week-of-year
     :month :month-of-year :quarter :quarter-of-year :year})
 
-(s/def ::relative-datetime-unit
+(s/def :metabase/relative-datetime-unit
   #{:minute :hour :day :week :month :quarter :year})
 
-(s/def ::datetime-literal-string
+(s/def :metabase/datetime-literal-string
   du/date-string?)
 
-(defmulti ^:private datetime-literal class)
-
-(defmethod datetime-literal java.sql.Date  [_] (constantly true))
-(defmethod datetime-literal java.util.Date [_] (constantly true))
-(defmethod datetime-literal String         [_] ::datetime-literal-string)
-
-(s/def ::datetime-literal
-  (s/multi-spec datetime-literal :class))
+(s/def :metabase/datetime-literal
+  (s/or
+   :java.sql.Date    (partial instance? java.sql.Date)
+   :java.util.Date   (partial instance? java.util.Date)
+   :datetime-literal :metabase/datetime-literal-string))
 
 
 (s/def :mbql/relative-datetime
   (s/or
-   :relative-datetime-with-2-args (partial = [:relative-datetime :current])
-   :relative-datetime-with-3-args (s/tuple (partial = :relative-datetime), int?, ::relative-datetime-unit)))
+   :current (s/cat :clause (partial = :relative-datetime)  :n (partial = :current))
+   :custom  (s/cat :clause (partial = :relative-datetime), :n int?, :unit :metabase/relative-datetime-unit)))
 
 
 ;;; +----------------------------------------------------------------------------------------------------------------+
@@ -85,14 +53,16 @@
 
 ;; [:field-id <id>]
 (s/def :mbql.field/field-id
-  (s/tuple (partial = :field-id), ::positive-int))
+  (s/cat :clause (partial = :field-id), :id :metabase/positive-int))
 
 ;; [:field-literal <field-name> <field-type>]
 (s/def :mbql.field/field-literal
-  (s/tuple (partial = :field-literal), ::non-blank-string, :mbql.field/type))
+  (s/cat :clause (partial = :field-literal), :field-name :metabase/non-blank-string, :field-type :mbql.field/type))
 
-(def-one-of :mbql.field/field-id-or-literal
-  :field-id :mbql.field/field-id, :field-literal :mbql.field/field-literal)
+(s/def :mbql.field/field-id-or-literal
+  (s/or
+   :field-id      :mbql.field/field-id
+   :field-literal :mbql.field/field-literal))
 
 ;; [:fk-> <source-field> <dest-field>]
 ;;
@@ -100,27 +70,34 @@
 ;;
 ;;   [:fk-> 10 20] --[NORMALIZE]--> [:fk-> [:field-id 10] [:field-id 20]]
 (s/def :mbql.field/fk->
-  (s/tuple (partial = :fk->), :mbql.field/field-id-or-literal, :mbql.field/field-id-or-literal))
+  (s/cat
+   :clause     (partial = :fk->)
+   :source-field :mbql.field/field-id-or-literal
+   :dest-field   :mbql.field/field-id-or-literal))
 
 ;; [:expression <expression-name>]
 ;;
 ;; Expression *references* refer to a something in the `:expressions` clause, e.g. something like `[:+ [:field-id 1]
 ;; [:field-id 2]]`
 (s/def :mbql.field/expression-ref
-  (s/tuple (partial = :expression), ::non-blank-string))
+  (s/cat :clause (partial = :expression), :expression-name :metabase/non-blank-string))
 
 ;; [:datetime-field <field> <unit>]
 ;;
 ;; datetime-field wraps a Field to give it an explict datetime bucketing unit, e.g.
 ;; [:datetime-field [:field-id 10] :day]
-(def-one-of :mbql.field/datetime-wrappable-field
-  :field-id      :mbql.field/field-id
-  :field-literal :mbql.field/:field-literal
-  :fk->          :mbql.field/fk->
-  :expression    :mbql.field/expression-ref)
+(s/def :mbql.field/datetime-wrappable-field
+  (s/or
+   :field-id      :mbql.field/field-id
+   :field-literal :mbql.field/:field-literal
+   :fk->          :mbql.field/fk->
+   :expression    :mbql.field/expression-ref))
 
 (s/def :mbql.field/datetime-field
-  (s/tuple (partial = :datetime-field), :mbql.field/datetime-wrappable-field, ::datetime-unit))
+  (s/cat
+   :clause (partial = :datetime-field)
+   :field  :mbql.field/datetime-wrappable-field
+   :unit   :metabase/datetime-unit))
 
 ;; [:binning-strategy <field> <strategy> <strategy-arg?>]
 ;;
@@ -128,34 +105,38 @@
 ;; use the multimethod below
 ;;
 ;; binning strategy can wrap any of the above clauses, but again, not another binning strategy clause
-(def-one-of :mbql.field/binnable-field
-  :field-id       :mbql.field/field-id
-  :field-literal  :mbql.field/field-literal
-  :fk->           :mbql.field/fk->
-  :expression     :mbql.field/expression-ref
-  :datetime-field :mbql.field/datetime-field)
-
-(defmulti ^:private binning-strategy #(name (nth % 2))) ; wrap in name so `:default` isn't the default case
-
-(defmethod binning-strategy "default"   [_]
-  (s/tuple (partial = :binning-strategy), :mbql.field/binnable-field (partial = :default)))
-
-(defmethod binning-strategy "num-bins"  [_]
-  (s/tuple (partial = :binning-strategy), :mbql.field/binnable-field (partial = :num-bins), ::positive-int))
-
-(defmethod binning-strategy "bin-width" [_]
-  (s/tuple (partial = :binning-strategy), :mbql.field/binnable-field (partial = :bin-width), ::positive-number))
+(s/def :mbql.field/binnable-field
+  (s/or
+   :field-id       :mbql.field/field-id
+   :field-literal  :mbql.field/field-literal
+   :fk->           :mbql.field/fk->
+   :expression     :mbql.field/expression-ref
+   :datetime-field :mbql.field/datetime-field))
 
 (s/def :mbql.field/binning-strategy
-  (s/and (is-clause? :binning-strategy)
-         (s/multi-spec binning-strategy :strategy)))
+  (s/or
+   :default   (s/cat
+               :clause   (partial = :binning-strategy)
+               :field    :mbql.field/binnable-field
+               :strategy (partial = :default))
+   :num-bins  (s/cat
+               :clause   (partial = :binning-strategy)
+               :field    :mbql.field/binnable-field
+               :strategy (partial = :num-bins)
+               :num-bins :metabase/positive-int)
+   :bin-width (s/cat
+               :clause   (partial = :binning-strategy)
+               :field    :mbql.field/binnable-field
+               :strategy (partial = :bin-width)
+               :num-bins :metabase/positive-number)))
 
-(def-one-of :mbql/field
-  :field-id         :mbql.field/field-id
-  :field-literal    :mbql.field/field-literal
-  :expression       :mbql.field/expression-ref
-  :datetime-field   :mbql.field/datetime-field
-  :binning-strategy :mbql.field/binning-strategy)
+(s/def :mbql/field
+  (s/or
+   :field-id         :mbql.field/field-id
+   :field-literal    :mbql.field/field-literal
+   :expression       :mbql.field/expression-ref
+   :datetime-field   :mbql.field/datetime-field
+   :binning-strategy :mbql.field/binning-strategy))
 
 
 ;; aggregate field reference refers to an aggregation, e.g.
@@ -172,13 +153,13 @@
 ;;
 ;; TODO - it would be nice if we could check that there's actually an aggregation with the corresponding index,
 ;; wouldn't it
-(s/def :mbql.field/aggregation-ref
-  (s/tuple (partial = :aggregation), ::non-negative-int)) ; aggregation clause index
+(s/def :mbql.field/ag-ref
+  (s/cat :clause (partial = :aggregation), :aggregation-index :metabase/non-negative-int))
 
-(s/def :mbql.field/field-or-aggregation-ref
+(s/def :mbql.field/field-or-ag-ref
   (s/or
-   :field           :mbql/field
-   :aggregation-ref :mbql.field/aggregation-ref))
+   :field  :mbql/field
+   :ag-ref :mbql.field/ag-ref))
 
 
 ;;; +----------------------------------------------------------------------------------------------------------------+
@@ -187,8 +168,9 @@
 
 ;;; -------------------------------------------------- Expressions ---------------------------------------------------
 
-(def-one-of :mbql.expression/def
-  :+ :mbql.expression/+, :- :mbql.expression/-, :* :mbql.expression/*, :* :mbql.expression/*)
+(s/def :mbql.expression/def
+  (s/or
+   :+ :mbql.expression/+, :- :mbql.expression/-, :* :mbql.expression/*, :* :mbql.expression/*))
 
 (s/def :mbql.expression/arg
   (s/or
@@ -196,10 +178,10 @@
    :expression :mbql.expression/def
    :field      :mbql/field))
 
-(s/def :mbql.expression/+ (s/cat :name (partial = :+), :x :mbql.expression/arg, :y (s/+ :mbql.expression/arg)))
-(s/def :mbql.expression/- (s/cat :name (partial = :-), :x :mbql.expression/arg, :y (s/+ :mbql.expression/arg)))
-(s/def :mbql.expression// (s/cat :name (partial = :/), :x :mbql.expression/arg, :y (s/+ :mbql.expression/arg)))
-(s/def :mbql.expression/* (s/cat :name (partial = :*), :x :mbql.expression/arg, :y (s/+ :mbql.expression/arg)))
+(s/def :mbql.expression/+ (s/cat :clause (partial = :+), :x :mbql.expression/arg, :y (s/+ :mbql.expression/arg)))
+(s/def :mbql.expression/- (s/cat :clause (partial = :-), :x :mbql.expression/arg, :y (s/+ :mbql.expression/arg)))
+(s/def :mbql.expression// (s/cat :clause (partial = :/), :x :mbql.expression/arg, :y (s/+ :mbql.expression/arg)))
+(s/def :mbql.expression/* (s/cat :clause (partial = :*), :x :mbql.expression/arg, :y (s/+ :mbql.expression/arg)))
 
 
 ;;; -------------------------------------------------- Aggregations --------------------------------------------------
@@ -211,8 +193,8 @@
 
 ;; For all of the 'normal' Aggregations below (excluding Metrics) fields are implicit Field IDs
 
-(s/def :mbql.aggregation/count     (s/cat :name (partial =  :count),     :field (s/? :mbql/field)))
-(s/def :mbql.aggregation/cum-count (s/cat :name (partial =  :cum-count), :field (s/? :mbql/field)))
+(s/def :mbql.aggregation/count     (s/cat :clause (partial =  :count),     :field (s/? :mbql/field)))
+(s/def :mbql.aggregation/cum-count (s/cat :clause (partial =  :cum-count), :field (s/? :mbql/field)))
 
 ;; technically aggregations besides count can also accept expressions as args, e.g.
 ;;
@@ -222,13 +204,26 @@
 ;;
 ;;    SUM(field_1 + field_2)
 
-(s/def :mbql.aggregation/avg,      (s/tuple (partial = :avg),      :mbql.aggregation/field-or-expression-def))
-(s/def :mbql.aggregation/cum-sum,  (s/tuple (partial = :cum-sum),  :mbql.aggregation/field-or-expression-def))
-(s/def :mbql.aggregation/distinct, (s/tuple (partial = :distinct), :mbql.aggregation/field-or-expression-def))
-(s/def :mbql.aggregation/stddev,   (s/tuple (partial = :stddev),   :mbql.aggregation/field-or-expression-def))
-(s/def :mbql.aggregation/sum,      (s/tuple (partial = :sum),      :mbql.aggregation/field-or-expression-def))
-(s/def :mbql.aggregation/min,      (s/tuple (partial = :min),      :mbql.aggregation/field-or-expression-def))
-(s/def :mbql.aggregation/max,      (s/tuple (partial = :max),      :mbql.aggregation/field-or-expression-def))
+(s/def :mbql.aggregation/avg
+  (s/cat :clause (partial = :avg), :field-or-expression :mbql.aggregation/field-or-expression-def))
+
+(s/def :mbql.aggregation/cum-sum,
+  (s/cat :clause (partial = :cum-sum), :field-or-expression :mbql.aggregation/field-or-expression-def))
+
+(s/def :mbql.aggregation/distinct,
+  (s/cat :clause (partial = :distinct), :field-or-expression :mbql.aggregation/field-or-expression-def))
+
+(s/def :mbql.aggregation/stddev,
+  (s/cat :clause (partial = :stddev), :field-or-expression :mbql.aggregation/field-or-expression-def))
+
+(s/def :mbql.aggregation/sum,
+  (s/cat :clause (partial = :sum), :field-or-expression :mbql.aggregation/field-or-expression-def))
+
+(s/def :mbql.aggregation/min,
+  (s/cat :clause (partial = :min), :field-or-expression :mbql.aggregation/field-or-expression-def))
+
+(s/def :mbql.aggregation/max,
+  (s/cat :clause (partial = :max), :field-or-expression :mbql.aggregation/field-or-expression-def))
 
 ;; Metrics are just 'macros' (placeholders for other aggregations with optional filter and breakout clauses) that get
 ;; expanded to other aggregations/etc. in the expand-macros middleware
@@ -236,10 +231,10 @@
 ;; METRICS WITH STRING IDS, e.g. `[:metric "ga:sessions"]`, are Google Analytics metrics, not Metabase metrics! They
 ;; pass straight thru to the GA query processor.
 (s/def :mbql.aggregation/metric
-  (s/tuple
-   (partial = :metric)
-   (s/or :metric-id      ::positive-int
-         :ga-metric-name ::non-blank-string)))
+  (s/cat
+   :clause (partial = :metric)
+   :id     (s/or :id      :metabase/positive-int
+                 :ga-name :metabase/non-blank-string)))
 
 ;; the following are definitions for expression aggregations, e.g. [:+ [:sum [:field-id 10]] [:sum [:field-id 20]]]
 
@@ -250,54 +245,58 @@
 
 (s/def :mbql.aggregation/+
   (s/cat
-   :name (partial = :+)
-   :x    :mbql.aggregation/expression-arg
-   :y    (s/+ :mbql.aggregation/expression-arg)))
+   :clause (partial = :+)
+   :x      :mbql.aggregation/expression-arg
+   :y      (s/+ :mbql.aggregation/expression-arg)))
 
 (s/def :mbql.aggregation/-
   (s/cat
-   :name (partial = :-)
-   :x    :mbql.aggregation/expression-arg
-   :y    (s/+ :mbql.aggregation/expression-arg)))
+   :clause (partial = :-)
+   :x      :mbql.aggregation/expression-arg
+   :y      (s/+ :mbql.aggregation/expression-arg)))
 
 (s/def :mbql.aggregation/*
   (s/cat
-   :name (partial = :*)
-   :x    :mbql.aggregation/expression-arg
-   :y    (s/+ :mbql.aggregation/expression-arg)))
+   :clause (partial = :*)
+   :x      :mbql.aggregation/expression-arg
+   :y      (s/+ :mbql.aggregation/expression-arg)))
 
 (s/def :mbql.aggregation//
   (s/cat
-   :name (partial = :/)
-   :x    :mbql.aggregation/expression-arg
-   :y    (s/+ :mbql.aggregation/expression-arg)))
+   :clause (partial = :/)
+   :x      :mbql.aggregation/expression-arg
+   :y      (s/+ :mbql.aggregation/expression-arg)))
 
 
-(def-one-of :mbql.aggregation/unnamed-aggregation
-  :count     :mbql.aggregation/count
-  :avg       :mbql.aggregation/avg
-  :cum-count :mbql.aggregation/cum-count
-  :cum-sum   :mbql.aggregation/cum-sum
-  :distinct  :mbql.aggregation/distinct
-  :stddev    :mbql.aggregation/stddev
-  :sum       :mbql.aggregation/sum
-  :min       :mbql.aggregation/min
-  :max       :mbql.aggregation/max
-  :metric    :mbql.aggregation/metric
-  :+         :mbql.aggregation/+
-  :-         :mbql.aggregation/-
-  :*         :mbql.aggregation/*
-  :/         :mbql.aggregation//)
+(s/def :mbql.aggregation/unnamed-aggregation
+  (s/or
+   :count     :mbql.aggregation/count
+   :avg       :mbql.aggregation/avg
+   :cum-count :mbql.aggregation/cum-count
+   :cum-sum   :mbql.aggregation/cum-sum
+   :distinct  :mbql.aggregation/distinct
+   :stddev    :mbql.aggregation/stddev
+   :sum       :mbql.aggregation/sum
+   :min       :mbql.aggregation/min
+   :max       :mbql.aggregation/max
+   :metric    :mbql.aggregation/metric
+   :+         :mbql.aggregation/+
+   :-         :mbql.aggregation/-
+   :*         :mbql.aggregation/*
+   :/         :mbql.aggregation//))
 
-;; any sort of aggregation can be wrapped in a `[:named <ag> <custom-name>]` clause, but you cannot wrap a `:named` in
-;; a `:named`
+;; any sort of aggregation can be wrapped in a `[:claused <ag> <custom-name>]` clause, but you cannot wrap a
+;; `:claused` in a `:claused`
 (s/def :mbql.aggregation/named-aggregation
-  (s/tuple (partial = :named), :mbql.aggregation/unnamed-aggregation, ::non-blank-string))
+  (s/cat
+   :clause           (partial = :claused)
+   :aggregation      :mbql.aggregation/unnamed-aggregation
+   :aggregation-name :metabase/non-blank-string))
 
 
 (s/def :mbql.aggregation/aggregation
   (s/or :unnamed :mbql.aggregation/unnamed-aggregation
-        :named :mbql.aggregation/named-aggregation))
+        :claused :mbql.aggregation/named-aggregation))
 
 (s/def :mbql/aggregation
   (s/+ :mbql.aggregation/aggregation))
@@ -310,23 +309,24 @@
 ;;
 ;; Field ID is implicit in these clauses
 
-(s/def :mbql.order-by/asc  (s/tuple (partial = :asc)  :mbql.field/field-or-aggregation-ref))
-(s/def :mbql.order-by/desc (s/tuple (partial = :desc) :mbql.field/field-or-aggregation-ref))
+(s/def :mbql.order-by/asc  (s/cat :clause (partial = :asc),  :field-or-ag-ref :mbql.field/field-or-ag-ref))
+(s/def :mbql.order-by/desc (s/cat :clause (partial = :desc), :field-or-ag-ref :mbql.field/field-or-ag-ref))
 
-(def-one-of :mbql.order-by/order-by
-  :asc  :mbql.order-by/asc
-  :desc :mbql.order-by/desc)
+(s/def :mbql.order-by/order-by
+  (s/or
+   :asc  :mbql.order-by/asc
+   :desc :mbql.order-by/desc))
 
 (s/def :mbql/order-by (s/+ :mbql.order-by/order-by))
 
 ;;; ----------------------------------------------------- Filter -----------------------------------------------------
 
 ;; [:and <filter> <filter+>]
-(s/def :mbql.filter/and (s/cat :name (partial = :and), :x :mbql.filter/filter, :y (s/+ :mbql.filter/filter)))
-(s/def :mbql.filter/or  (s/cat :name (partial = :or),  :x :mbql.filter/filter, :y (s/+ :mbql.filter/filter)))
+(s/def :mbql.filter/and (s/and (s/cat :clause (partial = :and), :filters (s/+ :mbql/filter)) #(>= (count (:filters %)) 2)))
+(s/def :mbql.filter/or  (s/and (s/cat :clause (partial = :or),  :filters (s/+ :mbql/filter)) #(>= (count (:filters %)) 2)))
 
 ;; [:not <filter>]
-(s/def :mbql.filter/not (s/tuple (partial = :not) :mbql.filter/filter))
+(s/def :mbql.filter/not (s/cat :clause (partial = :not), :filter :mbql.filter/filter))
 
 
 (s/def :mbql.filter/field-or-relative-datetime
@@ -341,16 +341,16 @@
    :boolean           boolean?
    :number            number?
    :string            string?
-   :datetime-literal  ::datetime-literal
+   :datetime-literal  :metabase/datetime-literal
    :field             :mbql/field
    :relative-datetime :mbql/relative-datetime))
 
 ;; Things that make sense in a filter like `>` or `<`, i.e. things that can be sorted.
-(s/def :mbql.filter/order-comaparible
+(s/def :mbql.filter/order-comparible
   (s/or
    :number            number?
    :string            string?
-   :datetime-literal  ::datetime-literal
+   :datetime-literal  :metabase/datetime-literal
    :field             :mbql/field
    :relative-datetime :mbql/relative-datetime))
 
@@ -358,45 +358,45 @@
 ;; [:= <field> <field-or-value+>]
 (s/def :mbql.filter/=
   (s/cat
-   :name             (partial = :=)
+   :clause           (partial = :=)
    :field            :mbql/field
    :values-or-fields (s/+ :mbql.filter/equality-comparible)))
 
 ;; [:!= <field> <field-or-value+>]
 (s/def :mbql.filter/!=
   (s/cat
-   :name             (partial = :!=)
+   :clause           (partial = :!=)
    :field            :mbql/field
    :values-or-fields (s/+ :mbql.filter/equality-comparible)))
 
 ;; [:< <field> <field-or-value>]
-(s/def :mbql.filter/<  (s/tuple (partial = :<)  :mbql/field :mbql.filter/order-comparible))
-(s/def :mbql.filter/>  (s/tuple (partial = :>)  :mbql/field :mbql.filter/order-comparible))
-(s/def :mbql.filter/<= (s/tuple (partial = :<=) :mbql/field :mbql.filter/order-comparible))
-(s/def :mbql.filter/>= (s/tuple (partial = :>=) :mbql/field :mbql.filter/order-comparible))
+(s/def :mbql.filter/<  (s/cat :clause (partial = :<),  :field :mbql/field, :y :mbql.filter/order-comparible))
+(s/def :mbql.filter/>  (s/cat :clause (partial = :>),  :field :mbql/field, :y :mbql.filter/order-comparible))
+(s/def :mbql.filter/<= (s/cat :clause (partial = :<=), :field :mbql/field, :y :mbql.filter/order-comparible))
+(s/def :mbql.filter/>= (s/cat :clause (partial = :>=), :field :mbql/field, :y :mbql.filter/order-comparible))
 
 ;; [:between <field> <min> <max>]
 (s/def :mbql.filter/between
-  (s/tuple
-   (partial = :between)
-   :mbql/field
-   :mbql.filter/order-comparible
-   :mbql.filter/order-comparible))
+  (s/cat
+   :clause (partial = :between)
+   :field  :mbql/field
+   :min    :mbql.filter/order-comparible
+   :max    :mbql.filter/order-comparible))
 
 ;; [:inside <lat-field> <lon-field> <lat-max> <lon-min> <lat-min> <lat-max>]
 (s/def :mbql.filter/inside
-  (s/tuple
-   (partial = :inside)
-   :mbql/field
-   :mbql/field
-   :mbql.filter/order-comparible
-   :mbql.filter/order-comparible
-   :mbql.filter/order-comparible
-   :mbql.filter/order-comparible))
+  (s/cat
+   :clause    (partial = :inside)
+   :lat-field :mbql/field
+   :lon-field :mbql/field
+   :lat-max   :mbql.filter/order-comparible
+   :lon-min   :mbql.filter/order-comparible
+   :lat-min   :mbql.filter/order-comparible
+   :lat-max   :mbql.filter/order-comparible))
 
 ;; [:is-null <field>]
-(s/def :mbql.filter/is-null (s/tuple (partial = :is-null)  :mbql/field))
-(s/def :mbql.filter/is-null (s/tuple (partial = :not-null) :mbql/field))
+(s/def :mbql.filter/is-null  (s/cat :clause (partial = :is-null),  :field :mbql/field))
+(s/def :mbql.filter/not-null (s/cat :clause (partial = :not-null), :field :mbql/field))
 
 (s/def :mbql.filter.string-filter-options/case-sensitive boolean?) ; default true
 (s/def :mbql.filter/string-filter-options
@@ -409,31 +409,31 @@
 
 (s/def :mbql.filter/starts-with
   (s/cat
-   :name  (partial = :starts-with)
-   :field :mbql/field
-   :arg   :mbql.filter/string-or-field
-   :opts  (s/? :mbql.filter/string-filter-options)))
+   :clause  (partial = :starts-with)
+   :field   :mbql/field
+   :arg     :mbql.filter/string-or-field
+   :options (s/? :mbql.filter/string-filter-options)))
 
 (s/def :mbql.filter/ends-with
   (s/cat
-   :name  (partial = :ends-with)
-   :field :mbql/field
-   :arg   :mbql.filter/string-or-field
-   :opts  (s/? :mbql.filter/string-filter-options)))
+   :clause  (partial = :ends-with)
+   :field   :mbql/field
+   :arg     :mbql.filter/string-or-field
+   :options (s/? :mbql.filter/string-filter-options)))
 
 (s/def :mbql.filter/contains
   (s/cat
-   :name  (partial = :contains)
-   :field :mbql/field
-   :arg   :mbql.filter/string-or-field
-   :opts  (s/? :mbql.filter/string-filter-options)))
+   :clause  (partial = :contains)
+   :field   :mbql/field
+   :arg     :mbql.filter/string-or-field
+   :options (s/? :mbql.filter/string-filter-options)))
 
 (s/def :mbql.filter/does-not-contain
   (s/cat
-   :name  (partial = :does-not-contain)
-   :field :mbql/field
-   :arg   :mbql.filter/string-or-field
-   :opts  (s/? :mbql.filter/string-filter-options)))
+   :clause  (partial = :does-not-contain)
+   :field   :mbql/field
+   :arg     :mbql.filter/string-or-field
+   :options (s/? :mbql.filter/string-filter-options)))
 
 (s/def :mbql.filter.time-interval-options/include-current boolean?) ; default false
 
@@ -443,50 +443,51 @@
 ;; [:time-interval <n> <unit> <options?>]
 (s/def :mbql.filter/time-interval
   (s/cat
-   :name    (partial = :time-interval)
+   :clause  (partial = :time-interval)
    :n       (s/or :int int?, :n #{:current :last :next})
-   :unit    ::relative-datetime-unit
+   :unit    :metabase/relative-datetime-unit
    :options (s/? :mbql.filter/time-interval-options)))
 
 ;; A segment is a special `macro` that saves some pre-definied filter clause, e.g. [:segment 1]
 ;; this gets replaced by a normal Filter clause in MBQL macroexpansion
 ;;
-;; It can also be used for GA, which looks something like `[:segment "gaid::-11"]`. GA segments aren't actually MBQL
-;; segments and pass-thru to GA.
+;; It can also be used for GA, which looks something like `[:segment "gaid:metabase/-11"]`. GA segments aren't
+;; actually MBQL segments and pass-thru to GA.
 (s/def :mbql.filter/segment
-  (s/tuple
-   (partial = :segment)
-   (s/or
-    :segment-id      ::positive-int
-    :ga-segment-name ::non-blank-string)))
+  (s/cat
+   :clause (partial = :segment)
+   :id     (s/or
+            :id      :metabase/positive-int
+            :ga-name :metabase/non-blank-string)))
 
-(def-one-of :mbql/filter
-  :and              :mbql.filter/and
-  :or               :mbql.filter/or
-  :not              :mbql.filter/not
-  :=                :mbql.filter/=
-  :!=               :mbql.filter/!=
-  :<                :mbql.filter/<
-  :>                :mbql.filter/>
-  :<=               :mbql.filter/<=
-  :>=               :mbql.filter/>=
-  :between          :mbql.filter/between
-  :inside           :mbql.filter/inside
-  :is-null          :mbql.filter/is-null
-  :not-null         :mbql.filter/not-null
-  :starts-with      :mbql.filter/starts-with
-  :ends-with        :mbql.filter/ends-with
-  :contains         :mbql.filter/contains
-  :does-not-contain :mbql.filter/does-not-contain
-  :time-interval    :mbql.filter/time-interval
-  :segment          :mbql.filter/segment)
+(s/def :mbql/filter
+  (s/or
+   :and              :mbql.filter/and
+   :or               :mbql.filter/or
+   :not              :mbql.filter/not
+   :=                :mbql.filter/=
+   :!=               :mbql.filter/!=
+   :<                :mbql.filter/<
+   :>                :mbql.filter/>
+   :<=               :mbql.filter/<=
+   :>=               :mbql.filter/>=
+   :between          :mbql.filter/between
+   :inside           :mbql.filter/inside
+   :is-null          :mbql.filter/is-null
+   :not-null         :mbql.filter/not-null
+   :starts-with      :mbql.filter/starts-with
+   :ends-with        :mbql.filter/ends-with
+   :contains         :mbql.filter/contains
+   :does-not-contain :mbql.filter/does-not-contain
+   :time-interval    :mbql.filter/time-interval
+   :segment          :mbql.filter/segment))
 
 
 ;;; ------------------------------------------------------ Page ------------------------------------------------------
 
-(s/def :mbql.page/page ::non-negative-int)
+(s/def :mbql.page/page :metabase/non-negative-int)
 
-(s/def :mbql.page/items ::positive-int)
+(s/def :mbql.page/items :metabase/positive-int)
 
 (s/def :mbql/page
   (s/keys :req-un [:mbql.page/page :mbql.page/items]))
@@ -509,13 +510,11 @@
   any?)
 
 (s/def :native/template-tags
-  (s/map-of ::non-blank-string :native/template-tag-definition))
+  (s/map-of :metabase/non-blank-string :native/template-tag-definition))
 
 ;; collection (table) this query should run against. Needed for MongoDB
 (s/def :native/collection
-  (s/or
-   :nil             nil?
-   :collection-name ::non-blank-string))
+  (s/nilable :metabase/non-blank-string))
 
 (s/def :query/native
   (s/keys
@@ -538,6 +537,8 @@
             :native/collection]))
 
 ;; spec for an MBQL source query is the same as MBQL inner query
+(s/def :query/query nil) ; declare the spec which we will define later
+
 (s/def :mbql.source-query/mbql
   :query/query)
 
@@ -552,14 +553,14 @@
 
 (s/def :mbql/source-table
   (s/or
-   :id          ::positive-int
+   :id          :metabase/positive-int
    :source-card (partial re-matches #"^card__[1-9]\d*$")))
 
 
 (s/def :mbql/breakout    (s/+ :mbql/field))
 (s/def :mbql/expressions (s/map-of keyword? :mbql.expression/def)) ; TODO - I think expressions keys should be strings
 (s/def :mbql/fields      (s/+ :mbql/field))
-(s/def :mbql/limit       ::non-negative-int)
+(s/def :mbql/limit       :metabase/non-negative-int)
 
 (defn- xor [x y]
   (and (or x y)
@@ -597,7 +598,7 @@
 ;;; ---------------------------------------------------- Options -----------------------------------------------------
 
 ;; The timezone the query should be ran in, overriding the default report timezone for the instance.
-(s/def :query.settings/report-timezone ::non-blank-string)
+(s/def :query.settings/report-timezone :metabase/non-blank-string)
 
 ;; Options that tweak the behavior of the query processor.
 (s/def :query/settings
@@ -605,10 +606,10 @@
 
 
 ;; maximum number of results to allow for a query with aggregations
-(s/def :query.constraints/max-results ::non-negative-int)
+(s/def :query.constraints/max-results :metabase/non-negative-int)
 
 ;; maximum number of results to allow for a query with no aggregations
-(s/def :query.constraints/max-results-bare-rows ::non-negative-int)
+(s/def :query.constraints/max-results-bare-rows :metabase/non-negative-int)
 
 ;; Additional constraints added to a query limiting the maximum number of rows that can be returned. Mostly useful
 ;; because native queries don't support the MBQL `:limit` clause. For MBQL queries, if `:limit` is set, it will
@@ -636,36 +637,35 @@
 
 ;; Spec for `info.context`; used for informational purposes to record how a query was executed.
 (s/def :query.info/context
-  (s/or
-   :nil     nil?
-   :context #{:ad-hoc
-              :csv-download
-              :dashboard
-              :embedded-dashboard
-              :embedded-question
-              :json-download
-              :map-tiles
-              :metabot
-              :public-dashboard
-              :public-question
-              :pulse
-              :question
-              :xlsx-download}))
+  (s/nilable
+   #{:ad-hoc
+     :csv-download
+     :dashboard
+     :embedded-dashboard
+     :embedded-question
+     :json-download
+     :map-tiles
+     :metabot
+     :public-dashboard
+     :public-question
+     :pulse
+     :question
+     :xlsx-download}))
 
-(s/def :query.info/executed-by  (s/or :nil nil?, :id ::positive-int))
-(s/def :query.info/card-id      (s/or :nil nil?, :id ::positive-int))
-(s/def :query.info/dashboard-id (s/or :nil nil?, :id ::positive-int))
-(s/def :query.info/pulse-id     (s/or :nil nil?, :id ::positive-int))
-(s/def :query.info/nested?      (some-fn nil? boolean?))
+(s/def :query.info/executed-by  (s/nilable :metabase/positive-int))
+(s/def :query.info/card-id      (s/nilable :metabase/positive-int))
+(s/def :query.info/dashboard-id (s/nilable :metabase/positive-int))
+(s/def :query.info/pulse-id     (s/nilable :metabase/positive-int))
+(s/def :query.info/nested?      (s/nilable boolean?))
 
 ;; `:hash` and `:query-type` get added automatically by `process-query-and-save-execution!`, so don't try passing
 ;; these in yourself. In fact, I would like this a lot better if we could take these keys out of `:info` entirely
 ;; and have the code that saves QueryExceutions figure out their values when it goes to save them
-(s/def :query.info/query-hash (some-fn nil? (partial instance? (Class/forName "[B"))))
+(s/def :query.info/query-hash (s/nilable (partial instance? (Class/forName "[B"))))
 
 ;; TODO - this key is pointless since we can just look at `:type`; let's normalize it out and remove it entirely
 ;; when we get a chance
-(s/def :query.info/query-type #{"MBQL" "native"})
+(s/def :query.info/query-type (s/nilable #{"MBQL" "native"}))
 
 ;; Spec for query `:info` dictionary, which is used for informational purposes to record information about how a query
 ;; was executed in QueryExecution and other places. It is considered bad form for middleware to change its behavior
@@ -687,7 +687,7 @@
 
 ;; TODO - move database/virtual-id into this namespace so we don't have to use the magic number here
 (s/def :query/database (s/or
-                        :id         ::positive-int
+                        :id         :metabase/positive-int
                         :virtual-id (partial = -1337)))
 
 (s/def :query/paramamters any?) ; TODO

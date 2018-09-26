@@ -4,17 +4,16 @@
              [string :as str]
              [walk :as walk]]
             [clojure.spec.alpha :as s]
-            [metabase.util :as u]))
+            [metabase.util :as u]
+            [orchestra.core :as o]))
 
 ;; someone has to do it!
 (require 'metabase.mbql.spec)
 
-(defn normalize-token
+(o/defn-spec normalize-token keyword?
   "Convert a string or keyword in various cases (`lisp-case`, `snake_case`, or `SCREAMING_SNAKE_CASE`) to a lisp-cased
   keyword."
-  [token]
-  {:pre  [(s/assert (s/or :keyword keyword?, :str string?) token)]
-   :post [(s/assert keyword? %)]}
+  [token (some-fn keyword? string?)]
   (-> (u/keyword->qualified-name token)
       str/lower-case
       (str/replace #"_" "-")
@@ -155,12 +154,9 @@
   {:post [(s/assert :mbql/filter %)]}
   (simplify-compound-filter (vec (cons :and (filter identity (cons filter-clause more-filter-clauses))))))
 
-(defn add-filter-clause
+(o/defn-spec add-filter-clause :metabase/query
   "Add an additional filter clause to an `outer-query`. If `new-clause` is `nil` this is a no-op."
-  [outer-query new-clause]
-  {:pre  [(s/assert :metabase/query outer-query)
-          (when new-clause (s/assert :mbql/filter new-clause))]
-   :post [(s/assert :metabase/query %)]}
+  [outer-query :metabase/query, new-clause (s/nilable :mbql/filter)]
   (if-not new-clause
     outer-query
     (update-in outer-query [:query :filter] combine-filter-clauses new-clause)))
@@ -207,17 +203,16 @@
     ;; for anything else, including expressions and ag clause references, just return the clause as-is
     clause))
 
-(defn add-order-by-clause
+(o/defn-spec add-order-by-clause :metabase/query
   "Add a new `:order-by` clause to an MBQL query. If the new order-by clause references a Field that is already being
   used in another order-by clause, this function does nothing."
-  [outer-query order-by-clause]
-  {:pre  [(s/assert :metabase/query outer-query)
-          (s/assert :mbql/order-by order-by-clause)]
-   :post [(s/assert :metabase/query %)]}
-  (let [existing-clauses (set (map (comp field-clause->id-or-literal second)
-                                   (-> outer-query :query :order-by)))]
-    (if (existing-clauses (field-clause->id-or-literal (second order-by-clause)))
-      ;; Field already referenced, nothing to do
-      outer-query
-      ;; otherwise add new clause at the end
-      (update-in outer-query [:query :order-by] (comp vec conj) order-by-clause))))
+  [outer-query :metabase/query, order-by-clause (s/nilable :mbql/order-by)]
+  (if-not order-by-clause
+    outer-query
+    (let [existing-clauses (set (map (comp field-clause->id-or-literal second)
+                                     (-> outer-query :query :order-by)))]
+      (if (existing-clauses (field-clause->id-or-literal (second order-by-clause)))
+        ;; Field already referenced, nothing to do
+        outer-query
+        ;; otherwise add new clause at the end
+        (update-in outer-query [:query :order-by] (comp vec conj) order-by-clause)))))

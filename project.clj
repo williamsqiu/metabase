@@ -85,6 +85,7 @@
                   :exclusions [com.github.wendykierp/JTransforms]]
                  [net.sf.cssbox/cssbox "4.12"                         ; HTML / CSS rendering
                   :exclusions [org.slf4j/slf4j-api]]
+                 [orchestra "2018.09.10-1"]                           ; complete instrumentation for spec; defn-spec macro
                  [org.clojars.pntblnk/clj-ldap "0.0.12"]              ; LDAP client
                  [org.liquibase/liquibase-core "3.6.2"                ; migration management (Java lib)
                   :exclusions [ch.qos.logback/logback-classic]]
@@ -149,6 +150,9 @@
                                            org.clojure/tools.namespace]]]
                    :env {:mb-run-mode "dev"}
                    :jvm-opts ["-Dlogfile.path=target/log"]
+                   ;; instrument all fn specs so args & return values are checked
+                   :injections [(require '[orchestra.spec.test :as st])
+                                (st/instrument)]
                    ;; Log appender class needs to be compiled for log4j to use it. Same with the Quartz class load helper
                    :aot [metabase.logger
                          metabase.task.DynamicClassLoadHelper]}

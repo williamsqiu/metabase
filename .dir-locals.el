@@ -6,6 +6,7 @@
                             (put 'defsetting 'clojure-doc-string-elt 2)
                             (put 'setting/defsetting 'clojure-doc-string-elt 2)
                             (put 's/defn 'clojure-doc-string-elt 2)
+                            (put 'o/defn-spec 'clojure-doc-string-elt 3)
 
                             ;; Define custom indentation for functions inside metabase.
                             ;; This list isn't complete; add more forms as we come across them.

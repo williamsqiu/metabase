@@ -13,6 +13,7 @@
              [task :as task]
              [util :as u]]
             [metabase.core.initialization-status :as init-status]
+            [orchestra.spec.test :as st]
             [metabase.models.setting :as setting]))
 
 ;;; ---------------------------------------- Expectations Framework Settings -----------------------------------------
@@ -96,6 +97,14 @@
         (System/exit -1)))
 
     @start-jetty!))
+
+
+(defn test-around-each
+  {:expectations-options :in-context}
+  [test-fn]
+  (st/instrument)
+  (test-fn))
+
 
 
 (defn test-teardown
