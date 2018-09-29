@@ -63,8 +63,6 @@ describe("recipient picker", () => {
   });
 });
 
-const EMAIL_PULSE = {};
-
 describe("pulse utils", () => {
   describe("canSendTestEmail", () => {
     it("should return true if the pulse is valid, email is set up and there are recipients", () => {
